@@ -2,8 +2,9 @@
 """
 Sudan Auto Index — Automated OpenSooq Sudan Scraper & FX Sync Engine
 Scrapes vehicles, agricultural machinery, and spare parts from sd.opensooq.com,
-converts USD prices using Supabase exchange_rates, normalizes Sudanese phone
-numbers & cities, upserts into car_listings, and deactivates stale OpenSooq ads (>36h).
+filters out real estate/irrelevant ads and generic site logos, converts USD prices
+using Supabase exchange_rates, normalizes Sudanese phone numbers & cities,
+upserts into car_listings, cleans polluted rows, and deactivates stale ads (>36h).
 """
 
 from __future__ import annotations
@@ -31,12 +32,13 @@ BASE_URL = "https://sd.opensooq.com"
 DEFAULT_PARALLEL_RATE = 2650.0
 STALE_HOURS = 36
 
-TARGET_QUERIES: list[tuple[str, str]] = [
-    ("تويوتا هايلوكس", "بكاسي ودفع رباعي"),
-    ("هيونداي توسان", "سيارات صالون"),
-    ("سيارات للبيع", "سيارات صالون"),
-    ("جرار زراعي", "جرارات وآليات زراعية"),
-    ("قطع غيار سيارات", "قطع غيار وإطارات"),
+# البحث داخل قسم السيارات والمركبات وقطع الغيار والآليات الثقيلة مباشرة
+TARGET_QUERIES: list[tuple[str, str, str]] = [
+    ("تويوتا هايلوكس", f"{BASE_URL}/ar/سيارات-ومركبات/سيارات-للبيع?term={quote_plus('هايلوكس')}", "بكاسي ودفع رباعي"),
+    ("هيونداي توسان", f"{BASE_URL}/ar/سيارات-ومركبات/سيارات-للبيع?term={quote_plus('توسان')}", "سيارات صالون"),
+    ("سيارات للبيع", f"{BASE_URL}/ar/سيارات-ومركبات/سيارات-للبيع", "سيارات صالون"),
+    ("شاحنات وآليات ثقيلة", f"{BASE_URL}/ar/سيارات-ومركبات/شاحنات-واليات-ثقيلة", "جرارات وآليات زراعية"),
+    ("قطع غيار سيارات", f"{BASE_URL}/ar/سيارات-ومركبات/قطع-غيار-اكسسوارات", "قطع غيار وإطارات"),
 ]
 
 USER_AGENT = (
@@ -46,6 +48,32 @@ USER_AGENT = (
 )
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
+
+EXCLUDE_WORDS: tuple[str, ...] = (
+    "قطعة ارض", "قطعة أرض", "ارض للبيع", "أرض للبيع", "اراضي", "أراضي",
+    "شقة", "شقق", "منزل", "بيوت", "عمارة", "فيلا", "مزرعة", "دكان", "مخزن",
+    "عقار", "عقارات", "متر مربع", "م2", "ناصية", "شهادة بحث", "درجة اولى",
+    "درجة أولى", "ايجار", "إيجار", "وظيفة", "مطلوب موظف", "ايفون", "آيفون",
+    "سامسونج", "لابتوب", "شاشة", "اثاث", "أثاث", "غرفة نوم", "مطبخ",
+)
+
+INCLUDE_WORDS: tuple[str, ...] = (
+    "سيارة", "سيارات", "مركبة", "تويوتا", "هايلوكس", "هايلكس", "لاندكروزر",
+    "لاند كروزر", "كورولا", "كامري", "برادو", "فورتشنر", "شاص", "يارس",
+    "هيونداي", "توسان", "اكسنت", "أكسنت", "النترا", "سوناتا", "سنتافي", "كريتا",
+    "كيا", "سبورتاج", "ريو", "سيراتو", "سورينتو", "نيسان", "باترول", "صني",
+    "نافارا", "ميتسوبيشي", "لانسر", "باجيرو", "l200", "شاحنة", "بوكس", "حافلة",
+    "دفار", "قلاية", "جرار", "حاصدة", "حصادة", "تراكتور", "معدات", "آليات",
+    "اليات", "ماسي", "فيرغسون", "قطع غيار", "اسبير", "إسبير", "اطارات",
+    "إطارات", "ماكينة", "مكينة", "جيربوكس", "قير", "بطارية", "رديتر", "كفرات",
+    "جنوط", "فانوس", "طلمبة", "hilux", "land cruiser", "tucson", "accent",
+    "tractor", "harvester", "car", "auto", "spare",
+)
+
+BAD_IMAGE_TOKENS: tuple[str, ...] = (
+    "logo", "og-image", "og_image", "opensooq-logo", "default", "placeholder",
+    "no-image", "noimage", "favicon", "brand", "banner", "avatar", "icon",
+)
 
 CITY_ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("بورتسودان", ("بورتسودان", "بورت سودان", "port sudan", "portsudan")),
@@ -71,6 +99,36 @@ def to_ascii_digits(text: str) -> str:
     return (text or "").translate(ARABIC_DIGITS)
 
 
+def is_valid_auto_listing(title: str, source_url: str = "") -> bool:
+    """Ensure the listing is genuinely about vehicles, machinery, or spare parts."""
+    normalized = to_ascii_digits(title or "").strip().lower()
+    if not normalized or len(normalized) < 4:
+        return False
+    # استبعاد روابط البحث العامة التي لا تشير لإعلان فردي
+    if "/ar/search/" in (source_url or "") or "?term=" in (source_url or ""):
+        return False
+    # استبعاد العقارات والإعلانات غير المتعلقة بالسيارات
+    if any(bad in normalized for bad in EXCLUDE_WORDS):
+        return False
+    # اشتراط وجود كلمة مفتاحية مرتبطة بالمركبات أو الآليات أو قطع الغيار
+    if not any(good in normalized for good in INCLUDE_WORDS):
+        return False
+    return True
+
+
+def clean_image_url(raw_url: Optional[str]) -> Optional[str]:
+    """Filter out generic OpenSooq logos, placeholders, and invalid image URLs."""
+    if not raw_url:
+        return None
+    url = raw_url.strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    lowered = url.lower()
+    if any(token in lowered for token in BAD_IMAGE_TOKENS):
+        return None
+    return url
+
+
 def normalize_sudan_phone(raw: Optional[str]) -> Optional[str]:
     """
     Normalize Sudanese phone numbers to 2499xxxxxxxx or 2491xxxxxxxx (12 digits).
@@ -85,7 +143,6 @@ def normalize_sudan_phone(raw: Optional[str]) -> Optional[str]:
         if len(digits) == 9 and digits[0] in ("9", "1"):
             return f"249{digits}"
 
-    # Fallback direct digit check
     digits_only = re.sub(r"\D", "", cleaned)
     if digits_only.startswith("00249"):
         digits_only = digits_only[2:]
@@ -115,7 +172,8 @@ def detect_category(text: str, default_category: str = "سيارات صالون"
     )
     agri_keywords = (
         "جرار", "تراكتور", "حاصدة", "حصادة", "آلية زراعية", "اليه زراعيه",
-        "ماسي فيرغسون", "ماسي", "كلاس", "جون دير", "tractor", "harvester", "combine", "massey",
+        "ماسي فيرغسون", "ماسي", "كلاس", "جون دير", "شاحنة", "دفار", "قلاية",
+        "tractor", "harvester", "combine", "massey", "truck",
     )
     pickup_4x4_keywords = (
         "هايلوكس", "هايلكس", "لاندكروزر", "لاند كروزر", "شاص", "بوكس", "بكاسي",
@@ -198,9 +256,6 @@ def parse_price(
 ) -> tuple[Optional[float], Optional[float]]:
     """
     Parse price and return (price_sdg, price_usd) with strict Sudan market validation.
-    - Converts valid USD prices (>= 1000) to SDG using parallel_rate.
-    - Enforces >= 500,000 SDG for vehicles/machinery and >= 10,000 SDG for spare parts.
-    - Rejects stray small numbers or phone numbers parsed as prices.
     """
     if raw_value is None:
         return None, None
@@ -214,7 +269,6 @@ def parse_price(
     is_million = "مليون" in text or "million" in text.lower()
     is_thousand = ("ألف" in text or "الف" in text) and not is_million
 
-    # Strip thousand separators cleanly
     cleaned = text.replace(",", "")
     match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
     if not match:
@@ -240,7 +294,6 @@ def parse_price(
             return None, None
         return price_sdg, price_usd
 
-    # SDG path
     if num < min_sdg or num > MAX_SANE_PRICE_SDG:
         return None, None
 
@@ -289,13 +342,17 @@ def extract_listing_from_html(
     if not title:
         return None
 
-    # Clean site suffix
     title = re.sub(r"\s*[-|]\s*(السوق المفتوح|OpenSooq).*$", "", title).strip()
+
+    # تطبيق فلتر التنقية الصارم
+    if not is_valid_auto_listing(title, url):
+        logger.debug("Filtered out non-auto listing: %s", title)
+        return None
 
     image_url = None
     og_image = soup.find("meta", property="og:image")
     if og_image and og_image.get("content"):
-        image_url = og_image["content"].strip()
+        image_url = clean_image_url(og_image["content"])
 
     description = ""
     og_desc = soup.find("meta", property="og:description")
@@ -331,12 +388,12 @@ def extract_listing_from_html(
                 currency_hint = node.get("priceCurrency")
             if node.get("image") and not image_url:
                 img = node["image"]
-                image_url = img[0] if isinstance(img, list) and img else str(img)
+                candidate_img = img[0] if isinstance(img, list) and img else str(img)
+                image_url = clean_image_url(candidate_img)
             addr = node.get("address") or node.get("areaServed")
             if isinstance(addr, dict) and not ld_city:
                 ld_city = str(addr.get("addressLocality") or addr.get("name") or "")
 
-    # Meta price fallback
     if raw_price is None:
         meta_price = soup.find("meta", property="product:price:amount") or soup.find("meta", attrs={"name": "price"})
         if meta_price and meta_price.get("content"):
@@ -362,9 +419,12 @@ def extract_listing_from_html(
     year_tag = detect_year_tag(f"{title} {description}")
     legal_status = detect_legal_status(f"{title} {description}")
 
-    # Stable external_id from OpenSooq ad ID or URL hash
     ad_id_match = re.search(r"/(\d{6,12})(?:/|$|\?)", url)
-    external_id = f"opensooq-{ad_id_match.group(1)}" if ad_id_match else f"opensooq-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}"
+    external_id = (
+        f"opensooq-{ad_id_match.group(1)}"
+        if ad_id_match
+        else f"opensooq-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}"
+    )
 
     return {
         "external_id": external_id,
@@ -395,7 +455,6 @@ def extract_search_cards_fallback(
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
 
-    # First check JSON-LD ItemList on the search page itself
     for script in soup.find_all("script", type="application/ld+json"):
         raw_json = script.string or script.get_text()
         if not raw_json:
@@ -409,22 +468,28 @@ def extract_search_cards_fallback(
             name = node.get("name")
             if not url or not name or "/ar/" not in str(url):
                 continue
-            abs_url = urljoin(BASE_URL, str(url))
+            abs_url = urljoin(BASE_URL, str(url).split("?")[0])
             if abs_url in seen_urls:
                 continue
             seen_urls.add(abs_url)
 
+            clean_title = str(name).strip()
+            if not is_valid_auto_listing(clean_title, abs_url):
+                continue
+
             offers = node.get("offers") if isinstance(node.get("offers"), dict) else {}
-            category = detect_category(str(name), default_category=default_category)
+            category = detect_category(clean_title, default_category=default_category)
             price_sdg, price_usd = parse_price(
                 offers.get("price") or node.get("price"),
                 currency_hint=offers.get("priceCurrency") or node.get("priceCurrency"),
                 category=category,
                 parallel_rate=parallel_rate,
-                context_text=str(name),
+                context_text=clean_title,
             )
             img = node.get("image")
-            image_url = img[0] if isinstance(img, list) and img else (str(img) if img else None)
+            raw_img = img[0] if isinstance(img, list) and img else (str(img) if img else None)
+            image_url = clean_image_url(raw_img)
+
             ad_id_match = re.search(r"/(\d{6,12})(?:/|$|\?)", abs_url)
             ext_id = (
                 f"opensooq-{ad_id_match.group(1)}"
@@ -436,15 +501,15 @@ def extract_search_cards_fallback(
                     "external_id": ext_id,
                     "source_platform": "OpenSooq",
                     "category": category,
-                    "title": str(name).strip()[:220],
-                    "model_tag": detect_model_tag(str(name), category),
-                    "year_tag": detect_year_tag(str(name)),
-                    "legal_status": detect_legal_status(str(name)),
+                    "title": clean_title[:220],
+                    "model_tag": detect_model_tag(clean_title, category),
+                    "year_tag": detect_year_tag(clean_title),
+                    "legal_status": detect_legal_status(clean_title),
                     "price_sdg": price_sdg,
                     "price_usd": price_usd,
-                    "city": detect_city(str(name)),
+                    "city": detect_city(clean_title),
                     "image_url": image_url,
-                    "seller_phone": normalize_sudan_phone(str(name)),
+                    "seller_phone": normalize_sudan_phone(clean_title),
                     "source_url": abs_url,
                     "is_active": True,
                     "last_seen_at": datetime.now(timezone.utc).isoformat(),
@@ -454,13 +519,15 @@ def extract_search_cards_fallback(
 
 
 def discover_detail_urls(html: str, limit: int = 12) -> list[str]:
-    """Find candidate OpenSooq listing detail URLs from a search page."""
+    """Find candidate OpenSooq individual listing detail URLs (excluding /ar/search/ pages)."""
     soup = BeautifulSoup(html, "html.parser")
     urls: list[str] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if re.search(r"/ar/search/\d+", href) or re.search(r"/\d{7,12}(?:/|$)", href):
+        if "/ar/search/" in href or "?term=" in href:
+            continue
+        if re.search(r"/\d{7,12}(?:/|$)", href):
             abs_url = urljoin(BASE_URL, href.split("?")[0])
             if abs_url not in seen and "opensooq.com" in abs_url:
                 seen.add(abs_url)
@@ -495,12 +562,66 @@ def fetch_parallel_rate(supabase_url: str, service_key: str) -> float:
     return DEFAULT_PARALLEL_RATE
 
 
+def cleanup_polluted_listings(supabase_url: str, service_key: str) -> None:
+    """Delete previously scraped non-auto listings (e.g., real estate) from car_listings."""
+    base = supabase_url.rstrip("/")
+    headers = {
+        **get_supabase_headers(service_key),
+        "Prefer": "return=minimal",
+    }
+    try:
+        resp = requests.get(
+            f"{base}/rest/v1/car_listings?select=id,title,source_url,image_url&source_platform=eq.OpenSooq",
+            headers=get_supabase_headers(service_key),
+            timeout=20,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        bad_ids = [
+            row["id"]
+            for row in rows
+            if not is_valid_auto_listing(row.get("title") or "", row.get("source_url") or "")
+        ]
+        if bad_ids:
+            id_list = ",".join(str(i) for i in bad_ids)
+            del_resp = requests.delete(
+                f"{base}/rest/v1/car_listings?id=in.({id_list})",
+                headers=headers,
+                timeout=20,
+            )
+            del_resp.raise_for_status()
+            logger.info("Deleted %d polluted non-auto rows from car_listings", len(bad_ids))
+
+        # إزالة روابط الشعارات من أي صف متبقٍ
+        logo_ids = [
+            row["id"]
+            for row in rows
+            if row.get("id") not in bad_ids
+            and row.get("image_url")
+            and clean_image_url(row.get("image_url")) is None
+        ]
+        if logo_ids:
+            logo_list = ",".join(str(i) for i in logo_ids)
+            patch_resp = requests.patch(
+                f"{base}/rest/v1/car_listings?id=in.({logo_list})",
+                headers=headers,
+                json={"image_url": None},
+                timeout=20,
+            )
+            patch_resp.raise_for_status()
+            logger.info("Cleared generic logo images on %d listings", len(logo_ids))
+    except Exception as exc:
+        logger.warning("Cleanup step encountered a non-fatal error: %s", exc)
+
+
 def upsert_listings(supabase_url: str, service_key: str, records: list[dict[str, Any]]) -> int:
-    """Upsert scraped records into Supabase car_listings on external_id."""
-    if not records:
+    """Filter and upsert scraped records into Supabase car_listings on external_id."""
+    clean_records = [
+        r for r in records if is_valid_auto_listing(r.get("title") or "", r.get("source_url") or "")
+    ]
+    if not clean_records:
         return 0
-    # Deduplicate by external_id within the batch
-    deduped = list({r["external_id"]: r for r in records}.values())
+    deduped = list({r["external_id"]: r for r in clean_records}.values())
     endpoint = f"{supabase_url.rstrip('/')}/rest/v1/car_listings?on_conflict=external_id"
     headers = {
         **get_supabase_headers(service_key),
@@ -534,7 +655,7 @@ def deactivate_stale_opensooq_listings(supabase_url: str, service_key: str) -> N
 
 
 def scrape_opensooq(parallel_rate: float) -> list[dict[str, Any]]:
-    """Scrape all 5 targeted OpenSooq Sudan queries."""
+    """Scrape all 5 targeted OpenSooq Sudan automotive & machinery categories."""
     session = requests.Session()
     session.headers.update(
         {
@@ -545,25 +666,22 @@ def scrape_opensooq(parallel_rate: float) -> list[dict[str, Any]]:
     )
 
     all_records: list[dict[str, Any]] = []
-    for query, default_cat in TARGET_QUERIES:
-        search_url = f"{BASE_URL}/ar/find?term={quote_plus(query)}"
-        logger.info("Querying OpenSooq: %s -> %s", query, search_url)
+    for query_label, search_url, default_cat in TARGET_QUERIES:
+        logger.info("Querying OpenSooq category [%s]: %s", query_label, search_url)
         try:
             res = session.get(search_url, timeout=20)
             if res.status_code != 200:
-                logger.warning("OpenSooq returned HTTP %s for query '%s'", res.status_code, query)
+                logger.warning("OpenSooq returned HTTP %s for '%s'", res.status_code, query_label)
                 continue
         except requests.RequestException as exc:
-            logger.warning("Request failed for query '%s': %s", query, exc)
+            logger.warning("Request failed for '%s': %s", query_label, exc)
             continue
 
-        # Parse inline search items first
         inline_items = extract_search_cards_fallback(res.text, default_cat, parallel_rate)
         all_records.extend(inline_items)
 
-        # Follow detail URLs for richer phone, price, and og:image extraction
-        detail_urls = discover_detail_urls(res.text, limit=8)
-        logger.info("Found %d inline items and %d detail URLs for '%s'", len(inline_items), len(detail_urls), query)
+        detail_urls = discover_detail_urls(res.text, limit=10)
+        logger.info("Found %d valid inline items and %d detail URLs for '%s'", len(inline_items), len(detail_urls), query_label)
 
         for detail_url in detail_urls:
             try:
@@ -588,15 +706,19 @@ def main() -> int:
         logger.error("Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
         return 1
 
+    # 1. تنظيف السجلات الملوثة وصور الشعارات الموجودة حالياً
+    cleanup_polluted_listings(supabase_url, service_key)
+
+    # 2. جلب سعر الصرف وسحب العروض الجديدة النظيفة
     parallel_rate = fetch_parallel_rate(supabase_url, service_key)
     records = scrape_opensooq(parallel_rate)
-    logger.info("Total scraped candidate records: %d", len(records))
+    logger.info("Total valid scraped candidate records: %d", len(records))
 
     if records:
         count = upsert_listings(supabase_url, service_key, records)
-        logger.info("Upserted %d listings into car_listings", count)
+        logger.info("Upserted %d clean listings into car_listings", count)
     else:
-        logger.warning("No records scraped in this run (site structure or rate limit may have blocked access)")
+        logger.warning("No new records scraped in this run")
 
     deactivate_stale_opensooq_listings(supabase_url, service_key)
     return 0
