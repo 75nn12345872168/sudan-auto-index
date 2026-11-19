@@ -3,8 +3,9 @@
 Sudan Auto Index — Automated OpenSooq Sudan Scraper & FX Sync Engine
 Scrapes individual vehicle, heavy/agricultural machinery, and spare part listings
 from sd.opensooq.com, filters out real estate/category pages and generic logos,
-extracts real listing photos (os-cdn.com), converts USD prices using Supabase
-exchange_rates, normalizes Sudanese phone numbers & cities, and syncs car_listings.
+extracts real listing photos (os-cdn.com / __NEXT_DATA__), converts USD prices
+using Supabase exchange_rates, normalizes Sudanese phone numbers & cities,
+and syncs car_listings.
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ USER_AGENT = (
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
 
-# كلمات الاستبعاد الصارمة (عقارات، أراضٍ، مزارع، مغاسل، صفحات أقسام عامة، إلكترونيات)
 EXCLUDE_WORDS: tuple[str, ...] = (
     "قطعة ارض", "قطعة أرض", "قطعه ارض", "قطعه أرض", "ارض للبيع", "أرض للبيع",
     "اراضي", "أراضي", "نص قطعه", "نص قطعة", "قطعة كافوري", "قطعه كافوري",
@@ -61,7 +61,6 @@ EXCLUDE_WORDS: tuple[str, ...] = (
     "سيارة موثوقة", "وعالية الجودة", "سيارات للبيع في السودان", "تصفح جميع",
 )
 
-# كلمات القبول الإلزامية (سيارات، مركبات، آليات ثقيلة/زراعية، دراجات، قطع غيار)
 INCLUDE_WORDS: tuple[str, ...] = (
     "سيارة", "سيارات", "مركبة", "تويوتا", "هايلوكس", "هايلكس", "هايلوكسي",
     "لاندكروزر", "لاند كروزر", "كورولا", "كامري", "برادو", "فورتشنر", "شاص",
@@ -77,7 +76,6 @@ INCLUDE_WORDS: tuple[str, ...] = (
     "tractor", "harvester", "loader", "car", "auto", "spare",
 )
 
-# أنماط روابط الشعارات والصور الافتراضية التي يجب رفضها
 BAD_IMAGE_TOKENS: tuple[str, ...] = (
     "logo", "og-image", "og_image", "opensooq-logo", "default", "placeholder",
     "no-image", "noimage", "favicon", "brand", "banner", "avatar", "icon",
@@ -110,18 +108,17 @@ def to_ascii_digits(text: str) -> str:
 
 def is_valid_auto_listing(title: str, source_url: str = "") -> bool:
     """
-    Strictly verify that a listing is an individual vehicle, machinery, or spare part ad.
-    Note: OpenSooq individual ad URLs always follow /ar/search/<6-12 digits>/...
+    Verify that a listing is an individual vehicle, machinery, or spare part ad.
+    Every individual OpenSooq ad URL contains a 6-12 digit ad ID segment (/<id>).
     """
     normalized = to_ascii_digits(title or "").strip().lower()
     if not normalized or len(normalized) < 4:
         return False
 
-    # استبعاد صفحات الأقسام العامة ونتائج البحث بدون رقم إعلان فردي
     if source_url:
         if "/ar/find" in source_url or "?term=" in source_url:
             return False
-        if "opensooq.com" in source_url and not re.search(r"/ar/search/\d{6,12}", source_url):
+        if "opensooq.com" in source_url and not re.search(r"/\d{6,12}(?:/|$|\?)", source_url):
             return False
 
     if any(bad in normalized for bad in EXCLUDE_WORDS):
@@ -138,6 +135,8 @@ def clean_image_url(raw_url: Optional[str]) -> Optional[str]:
     if not raw_url:
         return None
     url = raw_url.strip()
+    if url.startswith("//"):
+        url = f"https:{url}"
     if not url.startswith(("http://", "https://")):
         return None
     lowered = url.lower()
@@ -181,7 +180,6 @@ def detect_category(text: str, default_category: str = "سيارات صالون"
     """Classify listing accurately into one of the 4 canonical platform categories."""
     lowered = to_ascii_digits(text or "").lower()
 
-    # 1. الآليات الثقيلة والزراعية أولاً
     agri_keywords = (
         "جرار", "تراكتور", "حاصدة", "حصادة", "آلية زراعية", "اليه زراعيه",
         "ماسي فيرغسون", "ماسي", "كلاس", "جون دير", "شاحنة", "دفار", "قلاية",
@@ -191,7 +189,6 @@ def detect_category(text: str, default_category: str = "سيارات صالون"
     if any(k in lowered for k in agri_keywords):
         return "جرارات وآليات زراعية"
 
-    # 2. البكاسي والدفع الرباعي
     pickup_4x4_keywords = (
         "هايلوكس", "هايلكس", "هايلوكسي", "لاندكروزر", "لاند كروزر", "شاص",
         "بوكس", "بوكسي", "بكاسي", "دفع رباعي", "برادو", "فورتشنر", "تندرا",
@@ -201,7 +198,6 @@ def detect_category(text: str, default_category: str = "سيارات صالون"
     if any(k in lowered for k in pickup_4x4_keywords):
         return "بكاسي ودفع رباعي"
 
-    # 3. السيارات الكاملة (قبل قطع الغيار حتى لا تُصنف السيارة بسبب عبارة "ماكينة وقير فل")
     whole_vehicle_keywords = (
         "توسان", "النترا", "اكسنت", "أكسنت", "سوناتا", "سنتافي", "كريتا",
         "كورولا", "كامري", "يارس", "اوبتما", "أوبتيما", "سبورتاج", "ريو",
@@ -212,7 +208,6 @@ def detect_category(text: str, default_category: str = "سيارات صالون"
     if any(k in lowered for k in whole_vehicle_keywords):
         return "سيارات صالون" if default_category == "قطع غيار وإطارات" else default_category
 
-    # 4. قطع الغيار والإطارات
     parts_keywords = (
         "قطع غيار", "اسبير", "إسبير", "اطار", "إطار", "كفر", "جنوط",
         "بطارية", "فانوس", "رديتر", "طلمبة", "spare", "parts", "tire",
@@ -356,6 +351,15 @@ def _flatten_json_ld(data: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _extract_os_cdn_from_text(raw_text: str) -> Optional[str]:
+    """Find the first valid os-cdn.com listing image URL embedded in scripts or HTML."""
+    for match in re.findall(r"https?://[^\s\"'<>]+os-cdn\.com[^\s\"'<>]+", raw_text):
+        cleaned = clean_image_url(match)
+        if cleaned:
+            return cleaned
+    return None
+
+
 def extract_listing_from_html(
     html: str,
     url: str,
@@ -395,7 +399,7 @@ def extract_listing_from_html(
     ld_city: Optional[str] = None
     image_url: Optional[str] = None
 
-    # 1. صور الإعلان الفعلية من JSON-LD
+    # 1. صور الإعلان الفعلية والبيانات المهيكلة من JSON-LD
     for script in soup.find_all("script", type="application/ld+json"):
         raw_json = script.string or script.get_text()
         if not raw_json:
@@ -430,13 +434,7 @@ def extract_listing_from_html(
             if isinstance(addr, dict) and not ld_city:
                 ld_city = str(addr.get("addressLocality") or addr.get("name") or "")
 
-    # 2. صورة og:image (في صفحات OpenSooq الفردية تحمل صورة السيارة من os-cdn.com إذا وُجدت)
-    if not image_url:
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            image_url = clean_image_url(og_image["content"])
-
-    # 3. البحث المباشر عن صور الإعلان في خادم os-cdn.com
+    # 2. البحث في وسوم الصور المباشرة و __NEXT_DATA__ عن صور os-cdn.com
     if not image_url:
         for img_tag in soup.find_all("img"):
             src = img_tag.get("data-src") or img_tag.get("src") or ""
@@ -445,6 +443,15 @@ def extract_listing_from_html(
                 if cleaned_src:
                     image_url = cleaned_src
                     break
+
+    if not image_url:
+        image_url = _extract_os_cdn_from_text(html)
+
+    # 3. og:image كخيار أخير بعد استبعاد الشعارات الافتراضية
+    if not image_url:
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            image_url = clean_image_url(og_image["content"])
 
     if raw_price is None:
         meta_price = soup.find("meta", property="product:price:amount") or soup.find("meta", attrs={"name": "price"})
@@ -518,7 +525,7 @@ def extract_search_cards_fallback(
         for node in _flatten_json_ld(parsed):
             url = node.get("url")
             name = node.get("name")
-            if not url or not name or "/ar/search/" not in str(url):
+            if not url or not name or "/ar/" not in str(url):
                 continue
             abs_url = urljoin(BASE_URL, str(url).split("?")[0])
             if abs_url in seen_urls:
@@ -571,13 +578,15 @@ def extract_search_cards_fallback(
 
 
 def discover_detail_urls(html: str, limit: int = 12) -> list[str]:
-    """Find candidate OpenSooq individual listing detail URLs (/ar/search/<ad_id>/...)."""
+    """Find candidate OpenSooq individual listing detail URLs containing a 6-12 digit ad ID."""
     soup = BeautifulSoup(html, "html.parser")
     urls: list[str] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if re.search(r"/ar/search/\d{6,12}", href):
+        if "/ar/find" in href or "?term=" in href:
+            continue
+        if re.search(r"/\d{6,12}(?:/|$|\?)", href):
             abs_url = urljoin(BASE_URL, href.split("?")[0])
             if abs_url not in seen and "opensooq.com" in abs_url:
                 seen.add(abs_url)
@@ -779,7 +788,7 @@ def main() -> int:
         logger.error("Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
         return 1
 
-    # 1. تنظيف أي صفوف غير صالحة وإصلاح التصنيفات والصور القديمة
+    # 1. حذف أي صفوف غير صالحة وإصلاح التصنيفات والصور القديمة
     cleanup_and_repair_existing_listings(supabase_url, service_key)
 
     # 2. جلب سعر الصرف الموازي وسحب العروض الجديدة النظيفة بالصور الحقيقية
