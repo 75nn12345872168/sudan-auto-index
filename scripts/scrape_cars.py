@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Sudan Auto Index — Automated OpenSooq Sudan Scraper & FX Sync Engine
-Scrapes vehicles, agricultural machinery, and spare parts from sd.opensooq.com,
-filters out real estate/irrelevant ads and generic site logos, converts USD prices
-using Supabase exchange_rates, normalizes Sudanese phone numbers & cities,
-upserts into car_listings, cleans polluted rows, and deactivates stale ads (>36h).
+Scrapes vehicles, heavy/agricultural machinery, and spare parts from sd.opensooq.com,
+filters out real estate/irrelevant ads and generic site logos, repairs misclassified
+categories, converts USD prices using Supabase exchange_rates, normalizes Sudanese
+phone numbers & cities, upserts into car_listings, and deactivates stale ads (>36h).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ BASE_URL = "https://sd.opensooq.com"
 DEFAULT_PARALLEL_RATE = 2650.0
 STALE_HOURS = 36
 
-# البحث داخل قسم السيارات والمركبات وقطع الغيار والآليات الثقيلة مباشرة
+# البحث داخل أقسام السيارات والمركبات والآليات وقطع الغيار فقط
 TARGET_QUERIES: list[tuple[str, str, str]] = [
     ("تويوتا هايلوكس", f"{BASE_URL}/ar/سيارات-ومركبات/سيارات-للبيع?term={quote_plus('هايلوكس')}", "بكاسي ودفع رباعي"),
     ("هيونداي توسان", f"{BASE_URL}/ar/سيارات-ومركبات/سيارات-للبيع?term={quote_plus('توسان')}", "سيارات صالون"),
@@ -49,30 +49,39 @@ USER_AGENT = (
 
 ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
 
+# كلمات الاستبعاد الصارمة (عقارات، أراضٍ، مزارع، مغاسل، إلكترونيات، أثاث، وظائف)
 EXCLUDE_WORDS: tuple[str, ...] = (
-    "قطعة ارض", "قطعة أرض", "ارض للبيع", "أرض للبيع", "اراضي", "أراضي",
-    "شقة", "شقق", "منزل", "بيوت", "عمارة", "فيلا", "مزرعة", "دكان", "مخزن",
-    "عقار", "عقارات", "متر مربع", "م2", "ناصية", "شهادة بحث", "درجة اولى",
-    "درجة أولى", "ايجار", "إيجار", "وظيفة", "مطلوب موظف", "ايفون", "آيفون",
-    "سامسونج", "لابتوب", "شاشة", "اثاث", "أثاث", "غرفة نوم", "مطبخ",
+    "قطعة ارض", "قطعة أرض", "قطعه ارض", "قطعه أرض", "ارض للبيع", "أرض للبيع",
+    "اراضي", "أراضي", "نص قطعه", "نص قطعة", "قطعة كافوري", "قطعه كافوري",
+    "شقة", "شقق", "منزل", "بيوت", "عمارة", "عماره", "فيلا", "مزرعة", "مزرعه",
+    "مزارع", "فدان", "دكان", "مخزن", "مغسلة", "مغسله", "عقار", "عقارات",
+    "متر مربع", "م2", "ناصية", "ناصيه", "شهادة بحث", "شهاده بحث",
+    "درجة اولى", "درجة أولى", "درجه اولى", "درجه أولى", "ايجار", "إيجار",
+    "وظيفة", "وظيفه", "مطلوب موظف", "ايفون", "آيفون", "سامسونج", "لابتوب",
+    "شاشة", "اثاث", "أثاث", "غرفة نوم", "مطبخ",
 )
 
+# كلمات القبول الإلزامية (سيارات، مركبات، آليات ثقيلة/زراعية، دراجات، قطع غيار)
 INCLUDE_WORDS: tuple[str, ...] = (
-    "سيارة", "سيارات", "مركبة", "تويوتا", "هايلوكس", "هايلكس", "لاندكروزر",
-    "لاند كروزر", "كورولا", "كامري", "برادو", "فورتشنر", "شاص", "يارس",
-    "هيونداي", "توسان", "اكسنت", "أكسنت", "النترا", "سوناتا", "سنتافي", "كريتا",
-    "كيا", "سبورتاج", "ريو", "سيراتو", "سورينتو", "نيسان", "باترول", "صني",
-    "نافارا", "ميتسوبيشي", "لانسر", "باجيرو", "l200", "شاحنة", "بوكس", "حافلة",
-    "دفار", "قلاية", "جرار", "حاصدة", "حصادة", "تراكتور", "معدات", "آليات",
-    "اليات", "ماسي", "فيرغسون", "قطع غيار", "اسبير", "إسبير", "اطارات",
-    "إطارات", "ماكينة", "مكينة", "جيربوكس", "قير", "بطارية", "رديتر", "كفرات",
-    "جنوط", "فانوس", "طلمبة", "hilux", "land cruiser", "tucson", "accent",
-    "tractor", "harvester", "car", "auto", "spare",
+    "سيارة", "سيارات", "مركبة", "تويوتا", "هايلوكس", "هايلكس", "هايلوكسي",
+    "لاندكروزر", "لاند كروزر", "كورولا", "كامري", "برادو", "فورتشنر", "شاص",
+    "يارس", "هيونداي", "هيوندي", "توسان", "اكسنت", "أكسنت", "النترا", "سوناتا",
+    "سنتافي", "كريتا", "كيا", "اوبتما", "أوبتيما", "سبورتاج", "ريو", "سيراتو",
+    "سورينتو", "نيسان", "باترول", "صني", "نافارا", "ميتسوبيشي", "لانسر",
+    "باجيرو", "l200", "كلك", "سايكل", "موتر", "شاحنة", "بوكس", "بوكسي",
+    "حافلة", "دفار", "قلاية", "جرار", "حاصدة", "حصادة", "تراكتور", "معدات",
+    "آليات", "اليات", "لودر", "حفار", "بوكلين", "رافعة", "xcmg", "ماسي",
+    "فيرغسون", "قطع غيار", "اسبير", "إسبير", "اطارات", "إطارات", "ماكينة",
+    "مكينة", "جيربوكس", "قير", "بطارية", "رديتر", "كفرات", "جنوط", "فانوس",
+    "طلمبة", "hilux", "land cruiser", "tucson", "accent", "optima", "elantra",
+    "tractor", "harvester", "loader", "car", "auto", "spare",
 )
 
+# أنماط روابط الشعارات والصور الافتراضية التي يجب رفضها
 BAD_IMAGE_TOKENS: tuple[str, ...] = (
     "logo", "og-image", "og_image", "opensooq-logo", "default", "placeholder",
     "no-image", "noimage", "favicon", "brand", "banner", "avatar", "icon",
+    "share", "badge", "sprite", "blank", ".svg", ".gif",
 )
 
 CITY_ALIASES: list[tuple[str, tuple[str, ...]]] = [
@@ -100,24 +109,21 @@ def to_ascii_digits(text: str) -> str:
 
 
 def is_valid_auto_listing(title: str, source_url: str = "") -> bool:
-    """Ensure the listing is genuinely about vehicles, machinery, or spare parts."""
+    """Strictly verify that a listing belongs to vehicles, machinery, or spare parts."""
     normalized = to_ascii_digits(title or "").strip().lower()
     if not normalized or len(normalized) < 4:
         return False
-    # استبعاد روابط البحث العامة التي لا تشير لإعلان فردي
     if "/ar/search/" in (source_url or "") or "?term=" in (source_url or ""):
         return False
-    # استبعاد العقارات والإعلانات غير المتعلقة بالسيارات
     if any(bad in normalized for bad in EXCLUDE_WORDS):
         return False
-    # اشتراط وجود كلمة مفتاحية مرتبطة بالمركبات أو الآليات أو قطع الغيار
     if not any(good in normalized for good in INCLUDE_WORDS):
         return False
     return True
 
 
 def clean_image_url(raw_url: Optional[str]) -> Optional[str]:
-    """Filter out generic OpenSooq logos, placeholders, and invalid image URLs."""
+    """Reject OpenSooq default logos, share banners, icons, and invalid image URLs."""
     if not raw_url:
         return None
     url = raw_url.strip()
@@ -130,10 +136,7 @@ def clean_image_url(raw_url: Optional[str]) -> Optional[str]:
 
 
 def normalize_sudan_phone(raw: Optional[str]) -> Optional[str]:
-    """
-    Normalize Sudanese phone numbers to 2499xxxxxxxx or 2491xxxxxxxx (12 digits).
-    Accepts 09xxxxxxxx, 01xxxxxxxx, +249xxxxxxxxx, 00249xxxxxxxxx, 249xxxxxxxxx.
-    """
+    """Normalize Sudanese phone numbers to 2499xxxxxxxx or 2491xxxxxxxx (12 digits)."""
     if not raw:
         return None
     cleaned = to_ascii_digits(raw)
@@ -164,35 +167,55 @@ def detect_city(text: str) -> str:
 
 
 def detect_category(text: str, default_category: str = "سيارات صالون") -> str:
-    """Classify listing into one of the 4 canonical platform categories."""
+    """Classify listing accurately into one of the 4 canonical platform categories."""
     lowered = to_ascii_digits(text or "").lower()
-    parts_keywords = (
-        "قطع غيار", "اسبير", "إسبير", "اطار", "إطار", "كفر", "جنوط", "ماكينة",
-        "جيربوكس", "بطارية", "فانوس", "رديتر", "طلمبة", "spare", "parts", "tire",
-    )
+
+    # 1. الآليات الثقيلة والزراعية أولاً (جرارات، حاصدات، لودرات، شاحنات)
     agri_keywords = (
         "جرار", "تراكتور", "حاصدة", "حصادة", "آلية زراعية", "اليه زراعيه",
         "ماسي فيرغسون", "ماسي", "كلاس", "جون دير", "شاحنة", "دفار", "قلاية",
-        "tractor", "harvester", "combine", "massey", "truck",
+        "لودر", "حفار", "بوكلين", "رافعة", "xcmg", "caterpillar", "komatsu",
+        "jcb", "tractor", "harvester", "combine", "massey", "truck", "loader",
     )
+    if any(k in lowered for k in agri_keywords):
+        return "جرارات وآليات زراعية"
+
+    # 2. البكاسي والدفع الرباعي
     pickup_4x4_keywords = (
-        "هايلوكس", "هايلكس", "لاندكروزر", "لاند كروزر", "شاص", "بوكس", "بكاسي",
-        "دفع رباعي", "برادو", "فورتشنر", "تندرا", "تاكوما", "l200", "ميتسوبيشي",
-        "باترول", "نافارا", "hilux", "land cruiser", "prado", "4x4", "pickup",
+        "هايلوكس", "هايلكس", "هايلوكسي", "لاندكروزر", "لاند كروزر", "شاص",
+        "بوكس", "بوكسي", "بكاسي", "دفع رباعي", "برادو", "فورتشنر", "تندرا",
+        "تاكوما", "l200", "ميتسوبيشي", "باترول", "نافارا", "hilux",
+        "land cruiser", "prado", "4x4", "pickup",
+    )
+    if any(k in lowered for k in pickup_4x4_keywords):
+        return "بكاسي ودفع رباعي"
+
+    # 3. السيارات الكاملة (تُفحص قبل قطع الغيار حتى لا تُصنف السيارة بسبب عبارة "ماكينة وقير فل")
+    whole_vehicle_keywords = (
+        "توسان", "النترا", "اكسنت", "أكسنت", "سوناتا", "سنتافي", "كريتا",
+        "كورولا", "كامري", "يارس", "اوبتما", "أوبتيما", "سبورتاج", "ريو",
+        "سيراتو", "سورينتو", "صني", "لانسر", "كلك", "سايكل", "موتر",
+        "موديل 20", "الموديل", "خليجية", "خليجيه", "وارد", "مرور", "بوهية",
+        "كرتونة", "كرت الكرت", "زيرو",
+    )
+    if any(k in lowered for k in whole_vehicle_keywords):
+        return "سيارات صالون" if default_category == "قطع غيار وإطارات" else default_category
+
+    # 4. قطع الغيار والإطارات
+    parts_keywords = (
+        "قطع غيار", "اسبير", "إسبير", "اطار", "إطار", "كفر", "جنوط",
+        "بطارية", "فانوس", "رديتر", "طلمبة", "spare", "parts", "tire",
     )
     if any(k in lowered for k in parts_keywords):
         return "قطع غيار وإطارات"
-    if any(k in lowered for k in agri_keywords):
-        return "جرارات وآليات زراعية"
-    if any(k in lowered for k in pickup_4x4_keywords):
-        return "بكاسي ودفع رباعي"
+
     return default_category
 
 
 def detect_model_tag(text: str, category: str) -> Optional[str]:
     """Map title/description to one of the Fair Price Calculator model tags."""
     lowered = to_ascii_digits(text or "").lower()
-    if any(k in lowered for k in ("هايلوكس", "هايلكس", "hilux")):
+    if any(k in lowered for k in ("هايلوكس", "هايلكس", "هايلوكسي", "hilux")):
         return "Toyota Hilux"
     if any(k in lowered for k in ("لاندكروزر", "لاند كروزر", "land cruiser", "landcruiser")):
         return "Toyota Land Cruiser"
@@ -212,10 +235,14 @@ def detect_model_tag(text: str, category: str) -> Optional[str]:
 
 
 def detect_year_tag(text: str) -> Optional[str]:
-    """Extract a model year (2000-2026) and map it to calculator year ranges."""
+    """Extract a model year (2000-2027) and map it to calculator year ranges."""
     normalized = to_ascii_digits(text or "")
     years = [int(y) for y in re.findall(r"\b(20[0-2]\d)\b", normalized)]
-    valid_years = [y for y in years if 2000 <= y <= 2026]
+    valid_years = [y for y in years if 2000 <= y <= 2027]
+    if not valid_years:
+        short_match = re.search(r"(?:موديل|الموديل)\s*[:\-]?\s*(1\d|2[0-7])\b", normalized)
+        if short_match:
+            valid_years = [2000 + int(short_match.group(1))]
     if not valid_years:
         return None
     year = max(valid_years)
@@ -254,9 +281,7 @@ def parse_price(
     parallel_rate: float = DEFAULT_PARALLEL_RATE,
     context_text: str = "",
 ) -> tuple[Optional[float], Optional[float]]:
-    """
-    Parse price and return (price_sdg, price_usd) with strict Sudan market validation.
-    """
+    """Parse price and return (price_sdg, price_usd) with strict Sudan market validation."""
     if raw_value is None:
         return None, None
 
@@ -344,15 +369,9 @@ def extract_listing_from_html(
 
     title = re.sub(r"\s*[-|]\s*(السوق المفتوح|OpenSooq).*$", "", title).strip()
 
-    # تطبيق فلتر التنقية الصارم
     if not is_valid_auto_listing(title, url):
         logger.debug("Filtered out non-auto listing: %s", title)
         return None
-
-    image_url = None
-    og_image = soup.find("meta", property="og:image")
-    if og_image and og_image.get("content"):
-        image_url = clean_image_url(og_image["content"])
 
     description = ""
     og_desc = soup.find("meta", property="og:description")
@@ -363,7 +382,9 @@ def extract_listing_from_html(
     currency_hint: Optional[str] = None
     ld_phone: Optional[str] = None
     ld_city: Optional[str] = None
+    image_url: Optional[str] = None
 
+    # الأولوية 1: صور الإعلان الفعلية من JSON-LD (تتفادى شعار OpenSooq العام في og:image)
     for script in soup.find_all("script", type="application/ld+json"):
         raw_json = script.string or script.get_text()
         if not raw_json:
@@ -388,11 +409,31 @@ def extract_listing_from_html(
                 currency_hint = node.get("priceCurrency")
             if node.get("image") and not image_url:
                 img = node["image"]
-                candidate_img = img[0] if isinstance(img, list) and img else str(img)
-                image_url = clean_image_url(candidate_img)
+                candidates = img if isinstance(img, list) else [img]
+                for c in candidates:
+                    cleaned_c = clean_image_url(str(c))
+                    if cleaned_c:
+                        image_url = cleaned_c
+                        break
             addr = node.get("address") or node.get("areaServed")
             if isinstance(addr, dict) and not ld_city:
                 ld_city = str(addr.get("addressLocality") or addr.get("name") or "")
+
+    # الأولوية 2: og:image بعد الفلترة الصارمة
+    if not image_url:
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            image_url = clean_image_url(og_image["content"])
+
+    # الأولوية 3: صور الإعلان من CDN الخاص بـ OpenSooq
+    if not image_url:
+        for img_tag in soup.find_all("img"):
+            src = img_tag.get("data-src") or img_tag.get("src") or ""
+            if "opensooq" in src.lower() and any(seg in src.lower() for seg in ("/images/", "/media/", "cdn")):
+                cleaned_src = clean_image_url(src)
+                if cleaned_src:
+                    image_url = cleaned_src
+                    break
 
     if raw_price is None:
         meta_price = soup.find("meta", property="product:price:amount") or soup.find("meta", attrs={"name": "price"})
@@ -450,7 +491,7 @@ def extract_search_cards_fallback(
     default_category: str,
     parallel_rate: float,
 ) -> list[dict[str, Any]]:
-    """Extract listing links (and inline JSON-LD ItemList items if present) from search HTML."""
+    """Extract valid listing items from search page JSON-LD if present."""
     soup = BeautifulSoup(html, "html.parser")
     results: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
@@ -562,8 +603,12 @@ def fetch_parallel_rate(supabase_url: str, service_key: str) -> float:
     return DEFAULT_PARALLEL_RATE
 
 
-def cleanup_polluted_listings(supabase_url: str, service_key: str) -> None:
-    """Delete previously scraped non-auto listings (e.g., real estate) from car_listings."""
+def cleanup_and_repair_existing_listings(supabase_url: str, service_key: str) -> None:
+    """
+    1. Delete polluted non-auto rows (real estate, farms, car washes) from car_listings.
+    2. Clear generic OpenSooq logo URLs on remaining rows.
+    3. Re-classify misclassified categories (e.g., cars tagged as spare parts, loaders tagged as sedans).
+    """
     base = supabase_url.rstrip("/")
     headers = {
         **get_supabase_headers(service_key),
@@ -571,17 +616,22 @@ def cleanup_polluted_listings(supabase_url: str, service_key: str) -> None:
     }
     try:
         resp = requests.get(
-            f"{base}/rest/v1/car_listings?select=id,title,source_url,image_url&source_platform=eq.OpenSooq",
+            f"{base}/rest/v1/car_listings?select=id,title,category,model_tag,source_url,image_url,is_featured",
             headers=get_supabase_headers(service_key),
-            timeout=20,
+            timeout=25,
         )
         resp.raise_for_status()
         rows = resp.json()
-        bad_ids = [
-            row["id"]
-            for row in rows
-            if not is_valid_auto_listing(row.get("title") or "", row.get("source_url") or "")
-        ]
+
+        bad_ids: list[Any] = []
+        for row in rows:
+            if row.get("is_featured"):
+                continue
+            title = row.get("title") or ""
+            src_url = row.get("source_url") or ""
+            if not is_valid_auto_listing(title, src_url):
+                bad_ids.append(row["id"])
+
         if bad_ids:
             id_list = ",".join(str(i) for i in bad_ids)
             del_resp = requests.delete(
@@ -592,26 +642,39 @@ def cleanup_polluted_listings(supabase_url: str, service_key: str) -> None:
             del_resp.raise_for_status()
             logger.info("Deleted %d polluted non-auto rows from car_listings", len(bad_ids))
 
-        # إزالة روابط الشعارات من أي صف متبقٍ
-        logo_ids = [
-            row["id"]
-            for row in rows
-            if row.get("id") not in bad_ids
-            and row.get("image_url")
-            and clean_image_url(row.get("image_url")) is None
-        ]
-        if logo_ids:
-            logo_list = ",".join(str(i) for i in logo_ids)
-            patch_resp = requests.patch(
-                f"{base}/rest/v1/car_listings?id=in.({logo_list})",
-                headers=headers,
-                json={"image_url": None},
-                timeout=20,
-            )
-            patch_resp.raise_for_status()
-            logger.info("Cleared generic logo images on %d listings", len(logo_ids))
+        bad_set = set(bad_ids)
+        for row in rows:
+            row_id = row.get("id")
+            if row_id in bad_set:
+                continue
+
+            patch_payload: dict[str, Any] = {}
+            img = row.get("image_url")
+            if img and clean_image_url(img) is None:
+                patch_payload["image_url"] = None
+
+            title = row.get("title") or ""
+            current_cat = row.get("category") or "سيارات صالون"
+            fixed_cat = detect_category(title, default_category=current_cat)
+            if fixed_cat != current_cat:
+                patch_payload["category"] = fixed_cat
+
+            fixed_model = detect_model_tag(title, fixed_cat)
+            if fixed_model and fixed_model != row.get("model_tag"):
+                patch_payload["model_tag"] = fixed_model
+
+            if patch_payload:
+                p_resp = requests.patch(
+                    f"{base}/rest/v1/car_listings?id=eq.{row_id}",
+                    headers=headers,
+                    json=patch_payload,
+                    timeout=15,
+                )
+                p_resp.raise_for_status()
+
+        logger.info("Completed cleanup and category/image repair on existing listings")
     except Exception as exc:
-        logger.warning("Cleanup step encountered a non-fatal error: %s", exc)
+        logger.warning("Cleanup/repair step encountered a non-fatal error: %s", exc)
 
 
 def upsert_listings(supabase_url: str, service_key: str, records: list[dict[str, Any]]) -> int:
@@ -706,10 +769,10 @@ def main() -> int:
         logger.error("Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
         return 1
 
-    # 1. تنظيف السجلات الملوثة وصور الشعارات الموجودة حالياً
-    cleanup_polluted_listings(supabase_url, service_key)
+    # 1. تنظيف الصفوف الملوثة وإصلاح التصنيفات والصور القديمة في Supabase فوراً
+    cleanup_and_repair_existing_listings(supabase_url, service_key)
 
-    # 2. جلب سعر الصرف وسحب العروض الجديدة النظيفة
+    # 2. جلب سعر الصرف الموازي وسحب العروض الجديدة النظيفة
     parallel_rate = fetch_parallel_rate(supabase_url, service_key)
     records = scrape_opensooq(parallel_rate)
     logger.info("Total valid scraped candidate records: %d", len(records))
