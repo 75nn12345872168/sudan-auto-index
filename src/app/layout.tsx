@@ -20,6 +20,8 @@ export const metadata: Metadata = {
     "قطع غيار السيارات السودان",
     "حاسبة السعر العادل للسيارات",
     "سوق السيارات بورتسودان الخرطوم القضارف",
+    "Sudan car prices",
+    "Sudan Auto Index",
   ],
   verification: {
     google: "RuIOvIJ1RRQcVh1oztObRVEb7X4RUnA3oTS2-3DHvnA",
@@ -35,6 +37,12 @@ export const metadata: Metadata = {
     title: "مرصد أسعار السيارات وقطع الغيار والآليات في السودان",
     description:
       "اعرف السعر العادل لسيارتك أو آليتك في السودان بالجنيه والدولار الموازي، وتصفح أحدث العروض المباشرة بدون وسطاء.",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "مرصد أسعار السيارات وقطع الغيار والآليات في السودان",
+    description:
+      "حاسبة السعر العادل وأحدث عروض السيارات والآليات الزراعية وقطع الغيار في السودان.",
   },
   robots: {
     index: true,
