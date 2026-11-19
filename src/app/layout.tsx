@@ -1,34 +1,29 @@
 import type { Metadata } from "next";
-import { Cairo } from "next/font/google";
-import { PLATFORM_NAME, SITE_URL } from "@/lib/types";
 import "./globals.css";
 
-const cairo = Cairo({
-  subsets: ["arabic", "latin"],
-  weight: ["400", "500", "600", "700", "800", "900"],
-  variable: "--font-cairo",
-  display: "swap",
-});
+const SITE_URL = "https://sudan-auto-index-o3rg.vercel.app";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: `${PLATFORM_NAME} | أسعار السيارات والجرارات وقطع الغيار بالجنيه السوداني`,
-    template: `%s | ${PLATFORM_NAME}`,
+    default: "مرصد أسعار السيارات وقطع الغيار والآليات في السودان | Sudan Auto Index",
+    template: "%s | مرصد أسعار السيارات في السودان",
   },
   description:
-    "المنصة السودانية الأولى لمراقبة أسعار السيارات والبكاسي والآليات الزراعية وقطع الغيار في بورتسودان والقضارف وعطبرة وأم درمان والخرطوم، مع حاسبة السعر العادل بالجنيه السوداني والدولار.",
+    "حاسبة السعر العادل وأحدث أسعار السيارات، البكاسي (هايلوكس)، التوسان، الجرارات والآليات الزراعية، وقطع الغيار في السودان بالجنيه السوداني والدولار الموازي المحدث لحظياً.",
   keywords: [
     "أسعار السيارات في السودان",
-    "سوق السيارات السودان",
-    "تويوتا هايلوكس السودان",
-    "هيونداي توسان السودان",
-    "جرار زراعي ماسي فيرغسون السودان",
-    "حاصدة زراعية القضارف",
-    "قطع غيار سيارات السودان",
-    "سوق بورتسودان للسيارات",
+    "سعر تويوتا هايلوكس في السودان",
+    "سعر هيونداي توسان في السودان",
+    "دلالة السيارات السودان",
+    "أسعار الجرارات الزراعية في السودان",
+    "قطع غيار السيارات السودان",
     "حاسبة السعر العادل للسيارات",
+    "سوق السيارات بورتسودان الخرطوم القضارف",
   ],
+  verification: {
+    google: "RuIOvIJ1RRQcVh1oztObRVEb7X4RUnA3oTS2-3DHvnA",
+  },
   alternates: {
     canonical: SITE_URL,
   },
@@ -36,16 +31,10 @@ export const metadata: Metadata = {
     type: "website",
     locale: "ar_SD",
     url: SITE_URL,
-    siteName: PLATFORM_NAME,
-    title: `${PLATFORM_NAME} | حاسبة السعر العادل وعروض السودان المباشرة`,
+    siteName: "مرصد أسعار السيارات والآليات في السودان",
+    title: "مرصد أسعار السيارات وقطع الغيار والآليات في السودان",
     description:
-      "اعرف السعر العادل لتويوتا هايلوكس ولاندكروزر وتوسان والجرارات الزراعية وقطع الغيار في السودان وتواصل مباشرة مع المالك عبر واتساب.",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: PLATFORM_NAME,
-    description:
-      "مؤشر حي لأسعار السيارات والآليات الزراعية وقطع الغيار في السودان بالجنيه السوداني.",
+      "اعرف السعر العادل لسيارتك أو آليتك في السودان بالجنيه والدولار الموازي، وتصفح أحدث العروض المباشرة بدون وسطاء.",
   },
   robots: {
     index: true,
@@ -58,40 +47,9 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const autoDealerJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "AutoDealer",
-    name: PLATFORM_NAME,
-    url: SITE_URL,
-    description:
-      "مرصد رقمي وسوق إلكتروني لأسعار السيارات والبكاسي والآليات الزراعية وقطع الغيار في السودان مع حاسبة السعر العادل.",
-    areaServed: [
-      "بورتسودان",
-      "القضارف",
-      "عطبرة",
-      "أم درمان",
-      "الخرطوم",
-      "ود مدني",
-      "كسلا",
-      "دنقلا",
-      "الأبيض",
-      "كوستي",
-    ],
-    priceRange: "SDG",
-    telephone: "+249125939730",
-  };
-
   return (
-    <html lang="ar" dir="rtl" className={cairo.variable}>
-      <body className="min-h-screen bg-[#070b14] text-slate-50 antialiased selection:bg-amber-500/30 selection:text-amber-200">
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{
-            __html: JSON.stringify(autoDealerJsonLd),
-          }}
-        />
-        {children}
-      </body>
+    <html lang="ar" dir="rtl">
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
